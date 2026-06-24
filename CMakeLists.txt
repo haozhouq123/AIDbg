@@ -17,11 +17,34 @@ if(POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
 endif()
 
-# Static runtime (must match x64dbg build)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/msvc-static-runtime.cmake)
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/msvc-configurations.cmake)
+# =============================================================================
+# Inline: MSVC static runtime (must match x64dbg build)
+# =============================================================================
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    foreach(flag_var
+        CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+        CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO
+        CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE
+        CMAKE_C_FLAGS_MINSIZEREL CMAKE_C_FLAGS_RELWITHDEBINFO)
+        if(${flag_var} MATCHES "/MD")
+            string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+        endif()
+    endforeach()
+endif()
 
-# Allow user to override SDK path
+# =============================================================================
+# Inline: Default build configurations
+# =============================================================================
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+        Debug Release MinSizeRel RelWithDebInfo)
+endif()
+
+# =============================================================================
+# Inline: x64dbg SDK fetch
+# =============================================================================
 option(AIDBG_USE_LOCAL_SDK "Use locally installed x64dbg SDK instead of fetching" OFF)
 set(X64DBG_SDK_DIR "" CACHE PATH "Path to x64dbg pluginsdk directory (optional)")
 
@@ -31,14 +54,132 @@ if(NOT AIDBG_USE_LOCAL_SDK AND NOT X64DBG_SDK_DIR)
     FetchContent_Declare(x64dbg
         URL "https://downloads.sourceforge.net/project/x64dbg/snapshots/snapshot_2023-06-10_18-05.zip"
         URL_HASH SHA1=04468bd61fb36d6b10d17f342f03ef12f5b2ce62
-        TIMEOUT 120
+        TIMEOUT 180
     )
     FetchContent_MakeAvailable(x64dbg)
 endif()
 
-# Include x64dbg helper
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/x64dbg.cmake)
+# =============================================================================
+# Inline: x64dbg_plugin() function
+# =============================================================================
+function(x64dbg_plugin target)
+    # Determine architecture
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(ARCH "x64")
+        set(SUFFIX ".dp64")
+        set(LIB_NAME "x64dbg.lib")
+    else()
+        set(ARCH "x32")
+        set(SUFFIX ".dp32")
+        set(LIB_NAME "x32dbg.lib")
+    endif()
 
+    # Find SDK directory
+    set(PLUGIN_SDK_DIR "")
+    if(X64DBG_SDK_DIR AND EXISTS "${X64DBG_SDK_DIR}/bridgemain.h")
+        set(PLUGIN_SDK_DIR "${X64DBG_SDK_DIR}")
+    else()
+        # Search common locations in fetched content
+        foreach(candidate
+            "${x64dbg_SOURCE_DIR}/pluginsdk"
+            "${x64dbg_SOURCE_DIR}/release/pluginsdk"
+            "${x64dbg_BINARY_DIR}/pluginsdk"
+            "${x64dbg_BINARY_DIR}/release/pluginsdk"
+        )
+            if(EXISTS "${candidate}/bridgemain.h")
+                set(PLUGIN_SDK_DIR "${candidate}")
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if(NOT PLUGIN_SDK_DIR)
+        message(FATAL_ERROR
+            "x64dbg pluginsdk not found!\n"
+            "Options:\n"
+            "  1. Let CMake fetch it automatically (default, requires internet)\n"
+            "  2. Set -DX64DBG_SDK_DIR=C:/path/to/x64dbg/pluginsdk\n"
+            "  3. Download x64dbg snapshot from https://x64dbg.com\n"
+        )
+    endif()
+
+    message(STATUS "Using x64dbg SDK: ${PLUGIN_SDK_DIR}")
+    message(STATUS "Building ${target} as ${ARCH} plugin (${SUFFIX})")
+
+    # Find the .lib file
+    set(LIB_PATH "")
+    foreach(candidate
+        "${PLUGIN_SDK_DIR}/lib/${LIB_NAME}"
+        "${PLUGIN_SDK_DIR}/${LIB_NAME}"
+        "${PLUGIN_SDK_DIR}/lib/${ARCH}/${LIB_NAME}"
+    )
+        if(EXISTS "${candidate}")
+            set(LIB_PATH "${candidate}")
+            break()
+        endif()
+    endforeach()
+
+    if(NOT LIB_PATH)
+        message(WARNING "x64dbg .lib not found at expected path. Will try to link anyway.")
+        set(LIB_PATH "${PLUGIN_SDK_DIR}/lib/${LIB_NAME}")
+    endif()
+
+    # Create shared library
+    add_library(${target} SHARED ${ARGN})
+
+    # Include paths
+    target_include_directories(${target} PRIVATE
+        "${PLUGIN_SDK_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+
+    # Link with x64dbg lib
+    target_link_libraries(${target} PRIVATE "${LIB_PATH}")
+
+    # Windows system libs (WinHTTP for HTTP, etc.)
+    target_link_libraries(${target} PRIVATE
+        winhttp
+        wininet
+        ws2_32
+        user32
+        gdi32
+        comctl32
+        advapi32
+        crypt32
+        shell32
+        ole32
+    )
+
+    # Output naming: AIDbg.dp64 / AIDbg.dp32
+    set_target_properties(${target} PROPERTIES
+        PREFIX ""
+        SUFFIX "${SUFFIX}"
+        OUTPUT_NAME "${target}"
+    )
+
+    # C++ standard
+    target_compile_features(${target} PRIVATE cxx_std_17)
+
+    # Compile definitions
+    target_compile_definitions(${target} PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+        _WINSOCK_DEPRECATED_NO_WARNINGS
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+        UNICODE
+        _UNICODE
+        BUILD_PLUGIN
+    )
+
+    # Enable multicore compilation on MSVC
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /MP /W3 /EHsc)
+    endif()
+endfunction()
+
+# =============================================================================
+# AIDbg plugin target
+# =============================================================================
 set(AIDbg_SOURCES
     src/pluginmain.cpp
     src/plugin.cpp
@@ -53,15 +194,16 @@ set(AIDbg_SOURCES
     src/ui/SettingsDialog.cpp
 )
 
-x64dbg_plugin(AIDbg)
+x64dbg_plugin(AIDbg ${AIDbg_SOURCES})
 
-target_sources(AIDbg PRIVATE ${AIDbg_SOURCES})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${AIDbg_SOURCES})
 
-# Copy prompts to output directory
-add_custom_command(TARGET AIDbg POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/prompts
-        $<TARGET_FILE_DIR:AIDbg>/prompts
-    COMMENT "Copying prompt templates..."
-)
+# Copy prompts to output directory (optional, prompts are also embedded in code)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/prompts")
+    add_custom_command(TARGET AIDbg POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/prompts
+            $<TARGET_FILE_DIR:AIDbg>/prompts
+        COMMENT "Copying prompt templates..."
+    )
+endif()

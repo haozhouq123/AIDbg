@@ -6,7 +6,7 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main, master]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -28,6 +28,56 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Verify source files exist
+        run: |
+          Write-Host "=== Verifying required source files ==="
+          $required = @(
+            "CMakeLists.txt",
+            "src/pluginmain.cpp",
+            "src/pluginmain.h",
+            "src/plugin.cpp",
+            "src/plugin.h",
+            "src/utils/Logger.h",
+            "src/utils/HttpClient.h",
+            "src/utils/HttpClient.cpp",
+            "src/utils/ConfigManager.h",
+            "src/utils/ConfigManager.cpp",
+            "src/llm/ILLMProvider.h",
+            "src/llm/ProviderRegistry.h",
+            "src/llm/ProviderRegistry.cpp",
+            "src/llm/GLMProvider.h",
+            "src/llm/GLMProvider.cpp",
+            "src/llm/OpenAIProvider.h",
+            "src/llm/OpenAIProvider.cpp",
+            "src/llm/OllamaProvider.h",
+            "src/llm/OllamaProvider.cpp",
+            "src/core/ContextCollector.h",
+            "src/core/ContextCollector.cpp",
+            "src/commands/AICommands.h",
+            "src/commands/AICommands.cpp",
+            "src/ui/SettingsDialog.h",
+            "src/ui/SettingsDialog.cpp"
+          )
+          $missing = @()
+          foreach ($f in $required) {
+            if (Test-Path $f) {
+              Write-Host "  OK: $f"
+            } else {
+              Write-Host "  MISSING: $f" -ForegroundColor Red
+              $missing += $f
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host ""
+            Write-Host "ERROR: $($missing.Count) file(s) missing!" -ForegroundColor Red
+            Write-Host "These files were not uploaded to the repository."
+            Write-Host "Please re-upload the entire AIDbg-source directory."
+            exit 1
+          }
+          Write-Host ""
+          Write-Host "All $($required.Count) required files present." -ForegroundColor Green
+        shell: pwsh
+
       - name: Configure CMake
         run: cmake -B build -A ${{ matrix.cmake_platform }} -DCMAKE_BUILD_TYPE=Release
 
@@ -36,26 +86,32 @@ jobs:
 
       - name: Verify output exists
         run: |
-          Write-Host "Listing build output..."
-          Get-ChildItem -Path build/Release -Recurse | Format-Table FullName, Length
+          Write-Host "=== Listing build output ==="
+          Get-ChildItem -Path build/Release -Recurse -ErrorAction SilentlyContinue | Format-Table FullName, Length
           $plugin = "build/Release/AIDbg.${{ matrix.artifact_suffix }}"
           if (-not (Test-Path $plugin)) {
-            throw "Plugin file not found: $plugin"
+            Write-Host "ERROR: Plugin file not found: $plugin" -ForegroundColor Red
+            Write-Host "Build may have failed. Check the build log above."
+            exit 1
           }
-          Write-Host "OK: $plugin exists"
+          $size = (Get-Item $plugin).Length
+          Write-Host "OK: $plugin exists ($size bytes)" -ForegroundColor Green
         shell: pwsh
 
-      - name: Package plugin (with prompts)
+      - name: Package plugin (with prompts and docs)
         run: |
-          mkdir -p package/prompts
-          copy build/Release/AIDbg.${{ matrix.artifact_suffix }} package/
-          copy -r prompts/* package/prompts/ 2>$null; if ($LASTEXITCODE -ne 0) { Write-Host "No prompts dir, skipping" }
-          copy README.md package/
-          copy BUILD_VS2022.md package/
-          cd package
-          7z a ../AIDbg-${{ matrix.arch }}.zip *
-          cd ..
+          Write-Host "=== Packaging ==="
+          New-Item -ItemType Directory -Force -Path package/prompts | Out-Null
+          Copy-Item build/Release/AIDbg.${{ matrix.artifact_suffix }} package/
+          if (Test-Path prompts) {
+            Copy-Item prompts/* package/prompts/ -Recurse -ErrorAction SilentlyContinue
+          }
+          if (Test-Path README.md) { Copy-Item README.md package/ }
+          if (Test-Path BUILD_VS2022.md) { Copy-Item BUILD_VS2022.md package/ }
+          if (Test-Path GITHUB_ACTIONS_GUIDE.md) { Copy-Item GITHUB_ACTIONS_GUIDE.md package/ }
+          Compress-Archive -Path package/* -DestinationPath AIDbg-${{ matrix.arch }}.zip -Force
           Write-Host "Package created: AIDbg-${{ matrix.arch }}.zip"
+          Get-ChildItem AIDbg-${{ matrix.arch }}.zip | Format-Table Name, Length
         shell: pwsh
 
       - name: Upload build artifact
@@ -64,7 +120,7 @@ jobs:
           name: AIDbg-${{ matrix.arch }}
           path: |
             build/Release/AIDbg.${{ matrix.artifact_suffix }}
-            package/AIDbg-${{ matrix.arch }}.zip
+            AIDbg-${{ matrix.arch }}.zip
           retention-days: 90
 
       - name: Print build summary
@@ -72,19 +128,21 @@ jobs:
           Write-Host "========================================"
           Write-Host "  Build Summary: AIDbg ${{ matrix.display_name }}"
           Write-Host "========================================"
+          Write-Host ""
           Write-Host "Plugin file: build/Release/AIDbg.${{ matrix.artifact_suffix }}"
           Write-Host "Package:     AIDbg-${{ matrix.arch }}.zip"
           Write-Host ""
           Write-Host "Next steps:"
           Write-Host "  1. Download the artifact from the workflow run page"
           Write-Host "  2. Extract the .zip"
-          Write-Host "  3. Copy AIDbg.${{ matrix.artifact_suffix }} to your x64dbg plugins directory:"
           if ('${{ matrix.arch }}' -eq 'x64') {
-            Write-Host "     <x64dbg>\x64\plugins\"
+            Write-Host "  3. Copy AIDbg.${{ matrix.artifact_suffix }} to: <x64dbg>\x64\plugins\"
           } else {
-            Write-Host "     <x64dbg>\x32\plugins\"
+            Write-Host "  3. Copy AIDbg.${{ matrix.artifact_suffix }} to: <x64dbg>\x32\plugins\"
           }
           Write-Host "  4. Launch x64dbg and run 'ai config' to set API key"
+          Write-Host ""
+          Write-Host "Done!"
         shell: pwsh
 
   release:
@@ -103,7 +161,6 @@ jobs:
         run: |
           echo "=== Downloaded artifacts ==="
           find artifacts -type f
-          echo "=== Moving to release dir ==="
           mkdir -p release
           find artifacts -name "*.zip" -exec cp {} release/ \;
           ls -la release/
