@@ -13,7 +13,6 @@
 #include "pluginsdk/bridgemain.h"
 #include "pluginsdk/_plugins.h"
 #include "pluginsdk/_plugin_types.h"
-#include "pluginsdk/_exports.h"
 
 #include "pluginsdk/_scriptapi_argument.h"
 #include "pluginsdk/_scriptapi_assembler.h"
