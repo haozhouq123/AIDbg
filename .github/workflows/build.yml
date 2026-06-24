@@ -1,0 +1,141 @@
+name: Build AIDbg
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cmake_platform: x64
+            artifact_suffix: dp64
+            display_name: "64-bit (x64dbg)"
+          - arch: x86
+            cmake_platform: Win32
+            artifact_suffix: dp32
+            display_name: "32-bit (x32dbg)"
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -A ${{ matrix.cmake_platform }} -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build plugin
+        run: cmake --build build --config Release
+
+      - name: Verify output exists
+        run: |
+          Write-Host "Listing build output..."
+          Get-ChildItem -Path build/Release -Recurse | Format-Table FullName, Length
+          $plugin = "build/Release/AIDbg.${{ matrix.artifact_suffix }}"
+          if (-not (Test-Path $plugin)) {
+            throw "Plugin file not found: $plugin"
+          }
+          Write-Host "OK: $plugin exists"
+        shell: pwsh
+
+      - name: Package plugin (with prompts)
+        run: |
+          mkdir -p package/prompts
+          copy build/Release/AIDbg.${{ matrix.artifact_suffix }} package/
+          copy -r prompts/* package/prompts/ 2>$null; if ($LASTEXITCODE -ne 0) { Write-Host "No prompts dir, skipping" }
+          copy README.md package/
+          copy BUILD_VS2022.md package/
+          cd package
+          7z a ../AIDbg-${{ matrix.arch }}.zip *
+          cd ..
+          Write-Host "Package created: AIDbg-${{ matrix.arch }}.zip"
+        shell: pwsh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIDbg-${{ matrix.arch }}
+          path: |
+            build/Release/AIDbg.${{ matrix.artifact_suffix }}
+            package/AIDbg-${{ matrix.arch }}.zip
+          retention-days: 90
+
+      - name: Print build summary
+        run: |
+          Write-Host "========================================"
+          Write-Host "  Build Summary: AIDbg ${{ matrix.display_name }}"
+          Write-Host "========================================"
+          Write-Host "Plugin file: build/Release/AIDbg.${{ matrix.artifact_suffix }}"
+          Write-Host "Package:     AIDbg-${{ matrix.arch }}.zip"
+          Write-Host ""
+          Write-Host "Next steps:"
+          Write-Host "  1. Download the artifact from the workflow run page"
+          Write-Host "  2. Extract the .zip"
+          Write-Host "  3. Copy AIDbg.${{ matrix.artifact_suffix }} to your x64dbg plugins directory:"
+          if ('${{ matrix.arch }}' -eq 'x64') {
+            Write-Host "     <x64dbg>\x64\plugins\"
+          } else {
+            Write-Host "     <x64dbg>\x32\plugins\"
+          }
+          Write-Host "  4. Launch x64dbg and run 'ai config' to set API key"
+        shell: pwsh
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded artifacts
+        run: |
+          echo "=== Downloaded artifacts ==="
+          find artifacts -type f
+          echo "=== Moving to release dir ==="
+          mkdir -p release
+          find artifacts -name "*.zip" -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AIDbg ${{ github.ref_name }}
+          body: |
+            # AIDbg ${{ github.ref_name }}
+
+            ## Downloads
+            - **AIDbg-x64.zip** - 64-bit plugin (AIDbg.dp64) for x64dbg
+            - **AIDbg-x86.zip** - 32-bit plugin (AIDbg.dp32) for x32dbg
+
+            ## Installation
+            1. Download and extract the appropriate zip for your architecture
+            2. Copy `AIDbg.dp64` to `<x64dbg>\x64\plugins\` (or `AIDbg.dp32` to `<x64dbg>\x32\plugins\`)
+            3. Launch x64dbg
+            4. Run `ai config` in the command bar to set up your API key
+            5. Right-click in the disassembly view to access AI features
+
+            ## Quick test
+            ```
+            ai ask "What is ROP attack?"
+            ai explain
+            ai vuln
+            ```
+
+            ## Full documentation
+            See the README.md and BUILD_VS2022.md in the zip package.
+          files: |
+            release/*.zip
+          draft: false
+          prerelease: false

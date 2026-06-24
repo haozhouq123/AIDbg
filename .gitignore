@@ -1,0 +1,45 @@
+# 构建产物
+build/
+build64/
+build32/
+out/
+package/
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.aps
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+install_manifest.txt
+
+# 编译中间文件
+*.dp64
+*.dp32
+*.dll
+*.lib
+*.pdb
+*.exp
+*.obj
+*.ilk
+*.idb
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.log
+*.bak
