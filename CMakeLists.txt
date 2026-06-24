@@ -104,7 +104,21 @@ function(x64dbg_plugin target)
     endif()
 
     message(STATUS "Using x64dbg SDK: ${PLUGIN_SDK_DIR}")
+    message(STATUS "SDK parent dir: ${PLUGIN_SDK_DIR}/..")
     message(STATUS "Building ${target} as ${ARCH} plugin (${SUFFIX})")
+    
+    # Diagnostic: list a few key files to confirm SDK is properly extracted
+    foreach(check_file
+        "${PLUGIN_SDK_DIR}/bridgemain.h"
+        "${PLUGIN_SDK_DIR}/_plugins.h"
+        "${PLUGIN_SDK_DIR}/${LIB_NAME}"
+    )
+        if(EXISTS "${check_file}")
+            message(STATUS "  Found: ${check_file}")
+        else()
+            message(WARNING "  NOT FOUND: ${check_file}")
+        endif()
+    endforeach()
 
     # Find the .lib file
     set(LIB_PATH "")
@@ -128,7 +142,12 @@ function(x64dbg_plugin target)
     add_library(${target} SHARED ${ARGN})
 
     # Include paths
+    # Add BOTH the pluginsdk/ directory itself AND its parent.
+    # - Parent dir: so #include "pluginsdk/bridgemain.h" works (used by PluginTemplate convention)
+    # - pluginsdk/ dir: so #include "bridgemain.h" also works (defensive)
+    get_filename_component(PLUGIN_SDK_PARENT "${PLUGIN_SDK_DIR}" DIRECTORY)
     target_include_directories(${target} PRIVATE
+        "${PLUGIN_SDK_PARENT}"
         "${PLUGIN_SDK_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
     )
